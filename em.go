@@ -1,9 +1,15 @@
 package motif
 
 import (
+	"errors"
+	"fmt"
 	"math"
 	"sort"
 )
+
+// ErrNotConverged 表示 EM 在达到 MaxIterations 迭代上限后仍未满足收敛容差。
+// 该错误可通过 errors.Is 区分；出现时不返回任何半成品模型。
+var ErrNotConverged = errors.New("motif: EM did not converge within MaxIterations")
 
 // window 表示一条序列中一个可打分的有效片段。
 type window struct {
@@ -64,18 +70,31 @@ func overlapsAny(ivs []interval, start, end int) bool {
 
 // fitOneMotif 对给定窗口集合运行 rounds 次随机初始化的 EM，返回似然最高的模型。
 // 每轮使用独立的确定性子流（baseStream + round），逐轮顺序与中断恢复无关。
+// 每轮 EM 最多执行 maxIter 次迭代；未在限内收敛的轮次被丢弃，
+// 所有轮次均不收敛时返回 ErrNotConverged，绝不返回半成品模型。
 func fitOneMotif(windows []window, width int, bg Background, pseudocount, tol float64,
-	rounds int, seed uint64, baseStream uint64) (*emModel, error) {
+	rounds, maxIter int, seed uint64, baseStream uint64) (*emModel, error) {
 
 	// 第一轮使用确定性的数据驱动种子（每序列背景相对得分最高的窗口），
 	// 其余轮次为独立随机初始化；所有轮次共同竞争最大似然。
-	best := runEMSeeded(windows, width, bg, pseudocount, tol, dataDrivenSeeds(windows, width, bg))
+	var best *emModel
+	if model, ok := runEMSeeded(windows, width, bg, pseudocount, tol, maxIter,
+		dataDrivenSeeds(windows, width, bg)); ok {
+		best = model
+	}
 	for round := 0; round < rounds; round++ {
 		roundRand := streamRand(seed, baseStream+uint64(round))
-		model := runEM(windows, width, bg, pseudocount, tol, roundRand)
+		model, ok := runEM(windows, width, bg, pseudocount, tol, maxIter, roundRand)
+		if !ok {
+			continue
+		}
 		if best == nil || model.loglik > best.loglik {
 			best = model
 		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("%w (rounds=%d, maxIterations=%d, tol=%g)",
+			ErrNotConverged, rounds+1, maxIter, tol)
 	}
 	return best, nil
 }
@@ -122,7 +141,10 @@ func backgroundOdds(window []byte, bg Background) float64 {
 }
 
 // runEM 执行一次随机初始化的期望最大化。
-func runEM(windows []window, width int, bg Background, pseudocount, tol float64, r *rng) *emModel {
+// 返回的布尔值表示是否在 maxIter 步内收敛。
+func runEM(windows []window, width int, bg Background, pseudocount, tol float64,
+	maxIter int, r *rng) (*emModel, bool) {
+
 	bySeq := make(map[int][]int)
 	var seqOrder []int
 	for wi, w := range windows {
@@ -138,12 +160,14 @@ func runEM(windows []window, width int, bg Background, pseudocount, tol float64,
 		candidates := bySeq[si]
 		initialIdx = append(initialIdx, candidates[r.intn(len(candidates))])
 	}
-	return runEMSeeded(windows, width, bg, pseudocount, tol, initialIdx)
+	return runEMSeeded(windows, width, bg, pseudocount, tol, maxIter, initialIdx)
 }
 
 // runEMSeeded 从给定的每序列初始窗口索引出发执行 EM。
+// 最多执行 maxIter 次 E 步；达到上限仍未满足收敛容差时返回 ok=false，
+// 此时不返回任何模型，保证调用方不会拿到半成品结果。
 func runEMSeeded(windows []window, width int, bg Background, pseudocount, tol float64,
-	initialIdx []int) *emModel {
+	maxIter int, initialIdx []int) (*emModel, bool) {
 
 	bySeq := make(map[int][]int)
 	var seqOrder []int
@@ -169,7 +193,7 @@ func runEMSeeded(windows []window, width int, bg Background, pseudocount, tol fl
 	// 按序列组织窗口索引，保证 E 步在每条序列内归一化。
 	weights := make([]float64, len(windows))
 	prevLoglik := math.Inf(1)
-	for {
+	for iter := 0; iter < maxIter; iter++ {
 		// E 步：在当前矩阵下计算每个候选窗口的后验权重（每序列内归一化）。
 		loglik := 0.0
 		for _, si := range seqOrder {
@@ -194,13 +218,15 @@ func runEMSeeded(windows []window, width int, bg Background, pseudocount, tol fl
 		}
 
 		if math.Abs(loglik-prevLoglik) <= tol {
-			return selectSites(windows, weights, matrix, seqOrder, bySeq, loglik)
+			return selectSites(windows, weights, matrix, seqOrder, bySeq, loglik), true
 		}
 		prevLoglik = loglik
 
 		// M 步：按期望权重更新 PWM（加权计数 + 背景伪计数）。
 		matrix = weightedPWM(windows, weights, width, bg, pseudocount)
 	}
+	// 达到迭代上限仍未收敛：不返回模型，由调用方决定丢弃或报错。
+	return nil, false
 }
 
 // weightedPWM 根据期望权重构建加权 PWM。

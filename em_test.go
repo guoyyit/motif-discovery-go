@@ -25,7 +25,7 @@ func TestRunEMRecoversImplant(t *testing.T) {
 	}
 
 	windows := enumerateWindows(seqs, width, nil)
-	model, err := fitOneMotif(windows, width, DefaultBackground(), 0.1, 1e-4, 10,
+	model, err := fitOneMotif(windows, width, DefaultBackground(), 0.1, 1e-4, 10, 500,
 		999, globalStream(100, 0))
 	if err != nil {
 		t.Fatal(err)
