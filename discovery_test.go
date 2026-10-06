@@ -81,7 +81,7 @@ func TestDiscoverValidatesConfig(t *testing.T) {
 		t.Fatal("expected error for motif length < 4")
 	}
 	bad = testConfig(8)
-	bad.ScoreThreshold = 2
+	bad.ScoreThreshold = Float64(2)
 	if _, err := Discover(seqs, bad); err == nil {
 		t.Fatal("expected error for threshold > 1")
 	}
@@ -95,7 +95,9 @@ func resultsEqual(a, b *Result) bool {
 		ma, mb := a.Motifs[i], b.Motifs[i]
 		if ma.Matrix.Consensus() != mb.Matrix.Consensus() ||
 			ma.PValue != mb.PValue || ma.AdjustedPValue != mb.AdjustedPValue ||
-			ma.Significant != mb.Significant || len(ma.Sites) != len(mb.Sites) {
+			ma.Significant != mb.Significant || len(ma.Sites) != len(mb.Sites) ||
+			ma.Statistic != mb.Statistic || ma.NullCount != mb.NullCount ||
+			ma.Information != mb.Information {
 			return false
 		}
 		for j := range ma.Sites {

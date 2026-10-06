@@ -15,21 +15,41 @@ type Config struct {
 	ExpectMotifs int
 	// InitRounds 是每个模体 EM 的随机初始化轮数，取似然最高者。
 	InitRounds int
-	// ConvergenceTol 是 EM 对数似然的收敛容差（绝对变化量）。
+	// ConvergenceTol 是 EM 对数似然的收敛容差（绝对变化量）；缺省（0）填默认值。
 	ConvergenceTol float64
-	// ScoreThreshold 是位点归一化得分阈值（(0,1]），低于该值的位点不计入。
-	ScoreThreshold float64
-	// SignificanceAlpha 是经多重检验校正后的显著性阈值（FDR）。
-	SignificanceAlpha float64
+	// ScoreThreshold 是位点归一化得分阈值，合法范围 (0,1]。
+	// 使用指针以区分“缺省”（nil，填默认值 0.7）与显式给出的值；
+	// 显式给出 <=0 或 >1 的值会直接报错，绝不静默替换为默认值。
+	// 可用 motif.Float64(0.8) 构造。
+	ScoreThreshold *float64
+	// SignificanceAlpha 是经多重检验校正后的显著性阈值（FDR），合法范围 (0,1)。
+	// 同样以指针区分缺省（nil，填默认值 0.05）与显式值。
+	SignificanceAlpha *float64
 	// Shuffles 是显著性零分布的重排次数 B，最小经验 p 值为 1/(B+1)。
 	Shuffles int
+	// MaxEMIterations 是单次 EM 拟合的迭代上限；0 表示使用默认值。
+	// 达到上限仍不满足 ConvergenceTol 时，该任务以可区分的
+	// ErrEMNotConverged 错误失败，不会挂起，也不会返回半成品结果。
+	MaxEMIterations int
 	// Pseudocount 是 PWM 的伪计数强度。
 	Pseudocount float64
 	// Background 为零值（全零）时自动从输入序列估计。
 	Background Background
-	// MaskLowComplexity 为 true 时先掩码低复杂度区域，简单重复不会成为模体。
-	MaskLowComplexity bool
+	// MaskLowComplexity 控制低复杂度/简单重复区域掩码：
+	//   - nil（缺省）：默认启用保护，AT 串联重复等简单重复不会被报告为显著模体；
+	//   - 显式 true：启用掩码，语义与缺省路径完全一致（两条路径结论相同）；
+	//   - 显式 false：关闭掩码，由调用方自行承担简单重复被当作候选的风险。
+	// 缺省路径与显式开启后的结论逐位一致。
+	MaskLowComplexity *bool
 }
+
+// Bool 是设置 Config.MaskLowComplexity 等 *bool 字段的辅助函数：
+// motif.Bool(true) / motif.Bool(false)。
+func Bool(v bool) *bool { return &v }
+
+// Float64 是设置 Config.ScoreThreshold / SignificanceAlpha 等
+// *float64 字段的辅助函数：motif.Float64(0.8)。
+func Float64(v float64) *float64 { return &v }
 
 // Site 是模体在某条序列中的一个出现位置。
 type Site struct {
@@ -40,10 +60,15 @@ type Site struct {
 
 // Motif 是单个发现模体及其统计结论。
 type Motif struct {
-	Index          int
-	Matrix         *PWM
-	Sites          []Site
-	Information    float64
+	Index       int
+	Matrix      *PWM
+	Sites       []Site
+	Information float64
+	// Statistic 是观测统计量（每条序列最佳归一化得分之和）。
+	Statistic float64
+	// NullCount 是用于构建经验零分布的重排样本数 B。
+	// 结合 PValue 可核对超出次数：#{null >= observed} = PValue*(B+1) - 1。
+	NullCount      int
 	PValue         float64
 	AdjustedPValue float64
 	Significant    bool
@@ -64,52 +89,77 @@ const (
 	defaultAlpha          = 0.05
 	defaultShuffles       = 200
 	defaultPseudocount    = 0.5
+	// defaultMaxEMIterations 为 EM 单次拟合的默认迭代上限。
+	// 缺省配置下拟合始终有界，退化输入也在有限步内结束。
+	defaultMaxEMIterations = 1000
 )
 
+// maskLowComplexity 返回（填充默认值后的）低复杂度掩码开关的实际取值。
+// 缺省（nil）与显式 true 行为一致：均启用保护。
+func (c Config) maskLowComplexity() bool {
+	return c.MaskLowComplexity == nil || *c.MaskLowComplexity
+}
+
 // Validate 检查配置合法性并填充默认值，返回填充后的配置。
+//
+// 缺省值与非法值严格区分：缺省（整型零值、浮点零值、指针为 nil）视为
+// “未配置”，填入默认值；显式给出的越界值（如 ScoreThreshold <= 0、
+// SignificanceAlpha 不在 (0,1)、计数参数为负）直接返回错误，错误信息
+// 注明字段名与合法取值范围，绝不静默替换为默认值后继续运行。
 func (c Config) Validate() (Config, error) {
-	if c.MotifLength <= 0 {
+	// 先填充缺省值（仅限“未配置”语义的零值/nil）。
+	if c.MotifLength == 0 {
 		c.MotifLength = defaultMotifLength
 	}
-	if c.ExpectMotifs <= 0 {
+	if c.ExpectMotifs == 0 {
 		c.ExpectMotifs = defaultExpectMotifs
 	}
-	if c.InitRounds <= 0 {
+	if c.InitRounds == 0 {
 		c.InitRounds = defaultInitRounds
 	}
-	if c.ConvergenceTol <= 0 {
+	if c.ConvergenceTol == 0 {
 		c.ConvergenceTol = defaultConvergenceTol
 	}
-	if c.ScoreThreshold <= 0 {
-		c.ScoreThreshold = defaultScoreThreshold
+	if c.ScoreThreshold == nil {
+		c.ScoreThreshold = Float64(defaultScoreThreshold)
 	}
-	if c.SignificanceAlpha <= 0 {
-		c.SignificanceAlpha = defaultAlpha
+	if c.SignificanceAlpha == nil {
+		c.SignificanceAlpha = Float64(defaultAlpha)
 	}
-	if c.Shuffles <= 0 {
+	if c.Shuffles == 0 {
 		c.Shuffles = defaultShuffles
 	}
-	if c.Pseudocount <= 0 {
+	if c.MaxEMIterations == 0 {
+		c.MaxEMIterations = defaultMaxEMIterations
+	}
+	if c.Pseudocount == 0 {
 		c.Pseudocount = defaultPseudocount
 	}
 
-	var err error
+	// 再做范围校验：以下值若出现，必然是调用方显式给出的非法值。
 	switch {
 	case c.MotifLength < 4:
-		err = fmt.Errorf("config: MotifLength must be >= 4, got %d", c.MotifLength)
+		return c, fmt.Errorf("config: MotifLength must be >= 4 (got %d)", c.MotifLength)
 	case c.ExpectMotifs < 1:
-		err = fmt.Errorf("config: ExpectMotifs must be >= 1")
+		return c, fmt.Errorf("config: ExpectMotifs must be >= 1 (got %d)", c.ExpectMotifs)
 	case c.InitRounds < 1:
-		err = fmt.Errorf("config: InitRounds must be >= 1")
-	case c.ScoreThreshold > 1:
-		err = fmt.Errorf("config: ScoreThreshold must be within (0,1], got %g", c.ScoreThreshold)
-	case c.SignificanceAlpha > 1:
-		err = fmt.Errorf("config: SignificanceAlpha must be within (0,1], got %g", c.SignificanceAlpha)
+		return c, fmt.Errorf("config: InitRounds must be >= 1 (got %d)", c.InitRounds)
 	case c.Shuffles < 1:
-		err = fmt.Errorf("config: Shuffles must be >= 1")
-	}
-	if err != nil {
-		return c, err
+		return c, fmt.Errorf("config: Shuffles must be >= 1 (got %d)", c.Shuffles)
+	case c.MaxEMIterations < 1:
+		return c, fmt.Errorf("config: MaxEMIterations must be >= 1 (got %d)", c.MaxEMIterations)
+	case math.IsNaN(c.ConvergenceTol) || math.IsInf(c.ConvergenceTol, 0):
+		return c, fmt.Errorf("config: ConvergenceTol must be a finite number (got %v)", c.ConvergenceTol)
+	case c.ConvergenceTol < 0:
+		return c, fmt.Errorf("config: ConvergenceTol must be >= 0 (got %v)", c.ConvergenceTol)
+	case math.IsNaN(*c.ScoreThreshold) || *c.ScoreThreshold <= 0 || *c.ScoreThreshold > 1:
+		return c, fmt.Errorf("config: ScoreThreshold must be within (0,1] (got %v)", *c.ScoreThreshold)
+	case math.IsNaN(*c.SignificanceAlpha) || *c.SignificanceAlpha <= 0 || *c.SignificanceAlpha > 1:
+		return c, fmt.Errorf("config: SignificanceAlpha must be within (0,1) (got %v)", *c.SignificanceAlpha)
+	case math.IsNaN(c.Pseudocount) || math.IsInf(c.Pseudocount, 0):
+		return c, fmt.Errorf("config: Pseudocount must be a finite number (got %v)", c.Pseudocount)
+	case c.Pseudocount < 0:
+		return c, fmt.Errorf("config: Pseudocount must be >= 0 (got %v)", c.Pseudocount)
 	}
 
 	// 零值背景保留为零值，由发现流程在运行时从输入序列估计；
@@ -170,7 +220,7 @@ func newDiscoveryState(seqs []Sequence, cfg Config) (*discoveryState, error) {
 	working := make([][]byte, len(seqs))
 	for i, seq := range seqs {
 		data := append([]byte(nil), seq.Data...)
-		if cfg.MaskLowComplexity {
+		if cfg.maskLowComplexity() {
 			data = MaskLowComplexity(data)
 		}
 		working[i] = data
@@ -221,7 +271,8 @@ func (s *discoveryState) runDiscover(hook progressHook) error {
 		}
 		model, err := fitOneMotif(windows, s.cfg.MotifLength, s.cfg.Background,
 			s.cfg.Pseudocount, s.cfg.ConvergenceTol, s.cfg.InitRounds,
-			s.cfg.Seed, globalStream(highDiscover, uint64(k)))
+			s.cfg.MaxEMIterations,
+			s.cfg.Seed, globalStream(highDiscover, uint64(k)), "observed")
 		if err != nil {
 			return err
 		}
@@ -262,9 +313,11 @@ func (s *discoveryState) runShuffles(hook progressHook) error {
 				break
 			}
 			nullModel, err := fitOneMotif(nullWindows, s.cfg.MotifLength, s.cfg.Background,
-				s.cfg.Pseudocount, s.cfg.ConvergenceTol, nullInitRounds,
+				s.cfg.Pseudocount, s.cfg.ConvergenceTol, s.cfg.InitRounds,
+				s.cfg.MaxEMIterations,
 				s.cfg.Seed,
-				globalStream(highShuffleEM, uint64(b)*uint64(s.cfg.ExpectMotifs)+uint64(k)))
+				globalStream(highShuffleEM, uint64(b)*uint64(s.cfg.ExpectMotifs)+uint64(k)),
+				"null")
 			if err != nil {
 				return err
 			}
@@ -298,15 +351,17 @@ func (s *discoveryState) finalize() (*Result, error) {
 
 	result := &Result{Motifs: make([]Motif, 0, len(s.models))}
 	for k, model := range s.models {
-		sites := filterSites(model, s.working, s.cfg.ScoreThreshold)
+		sites := filterSites(model, s.working, *s.cfg.ScoreThreshold)
 		result.Motifs = append(result.Motifs, Motif{
 			Index:          k,
 			Matrix:         model.matrix,
 			Sites:          sites,
 			Information:    informationContent(model.matrix),
+			Statistic:      observed[k],
+			NullCount:      len(s.nullScores[k]),
 			PValue:         pvalues[k],
 			AdjustedPValue: adjusted[k],
-			Significant:    adjusted[k] <= s.cfg.SignificanceAlpha,
+			Significant:    adjusted[k] <= *s.cfg.SignificanceAlpha,
 		})
 	}
 	s.result = result
@@ -330,10 +385,6 @@ const (
 	highShuffle   = 2
 	highShuffleEM = 3
 )
-
-// nullInitRounds 是零分布每次重排拟合使用的初始化轮数，
-// 独立于 cfg.InitRounds，用于控制显著性评估的计算开销。
-const nullInitRounds = 3
 
 func compactModels(models []*emModel) []*emModel {
 	out := models[:0]

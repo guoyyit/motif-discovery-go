@@ -11,7 +11,7 @@ func TestSignificanceCalibration(t *testing.T) {
 	const alpha = 0.05
 	cfg := testConfig(8)
 	cfg.Shuffles = 39
-	cfg.SignificanceAlpha = alpha
+	cfg.SignificanceAlpha = Float64(alpha)
 
 	falsePositives := 0
 	anySignificant := 0

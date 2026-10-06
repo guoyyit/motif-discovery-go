@@ -17,7 +17,7 @@ func TestEdgeAllMasked(t *testing.T) {
 	}
 	cfg := testConfig(8)
 	cfg.Shuffles = 5
-	cfg.MaskLowComplexity = true
+	cfg.MaskLowComplexity = Bool(true)
 	res, err := Discover(seqs, cfg)
 	if err != nil {
 		t.Fatal(err)

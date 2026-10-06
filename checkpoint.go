@@ -50,6 +50,8 @@ type savedMotif struct {
 	Bg             [4]float64  `json:"bg"`
 	Sites          []Site      `json:"sites"`
 	Information    float64     `json:"information"`
+	Statistic      float64     `json:"statistic"`
+	NullCount      int         `json:"null_count"`
 	PValue         float64     `json:"p_value"`
 	AdjustedPValue float64     `json:"adjusted_p_value"`
 	Significant    bool        `json:"significant"`
@@ -98,6 +100,8 @@ func toSavedResult(r *Result) savedResult {
 			Bg:             m.Matrix.bg.Freq,
 			Sites:          m.Sites,
 			Information:    m.Information,
+			Statistic:      m.Statistic,
+			NullCount:      m.NullCount,
 			PValue:         m.PValue,
 			AdjustedPValue: m.AdjustedPValue,
 			Significant:    m.Significant,
@@ -129,6 +133,8 @@ func fromSavedResult(sr savedResult) *Result {
 			Matrix:         matrix,
 			Sites:          sm.Sites,
 			Information:    sm.Information,
+			Statistic:      sm.Statistic,
+			NullCount:      sm.NullCount,
 			PValue:         sm.PValue,
 			AdjustedPValue: sm.AdjustedPValue,
 			Significant:    sm.Significant,

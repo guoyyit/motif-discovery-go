@@ -24,7 +24,7 @@ func TestDiscoverFiltersSimpleRepeats(t *testing.T) {
 
 	cfg := testConfig(width)
 	cfg.Shuffles = 40
-	cfg.MaskLowComplexity = true
+	cfg.MaskLowComplexity = Bool(true)
 	result, err := Discover(seqs, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +37,35 @@ func TestDiscoverFiltersSimpleRepeats(t *testing.T) {
 		if m.Significant && IsLowComplexity([]byte(c)) {
 			t.Fatalf("simple repeat declared significant: %q", c)
 		}
+	}
+}
+
+// TestExplicitMaskingFalsePreservesOptOut 需求 9：显式关闭掩码是
+// 调用方的明确选择，该开关必须继续按原语义生效——重复片段不再被掩码，
+// 会进入候选窗口（区别于默认/显式开启路径）。
+func TestExplicitMaskingFalsePreservesOptOut(t *testing.T) {
+	seq := []byte(strings.Repeat("AT", 16))
+	masked := MaskLowComplexity(seq) // 直接调用掩码函数始终掩码
+	if string(masked) == string(seq) {
+		t.Fatal("MaskLowComplexity should mask a pure AT repeat")
+	}
+
+	// 通过配置显式关闭：工作序列应保持原样，窗口数量 = n-L+1（无 N 跳过）。
+	seqs := []Sequence{{Name: "s", Data: seq}}
+	st, err := newDiscoveryState(seqs, Config{
+		MotifLength:       8,
+		ExpectMotifs:      1,
+		Shuffles:          4,
+		MaskLowComplexity: Bool(false),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(st.working[0]) != string(seq) {
+		t.Fatalf("explicit masking=false must leave sequence unmasked: %q", st.working[0])
+	}
+	if got := len(enumerateWindows(st.working, 8, nil)); got != len(seq)-8+1 {
+		t.Fatalf("unmasked repeat should yield %d windows, got %d", len(seq)-8+1, got)
 	}
 }
 

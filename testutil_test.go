@@ -37,8 +37,8 @@ func testConfig(width int) Config {
 		ExpectMotifs:      1,
 		InitRounds:        10,
 		ConvergenceTol:    1e-4,
-		ScoreThreshold:    0.8,
-		SignificanceAlpha: 0.05,
+		ScoreThreshold:    Float64(0.8),
+		SignificanceAlpha: Float64(0.05),
 		Shuffles:          50,
 		Pseudocount:       0.5,
 	}
